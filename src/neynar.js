@@ -21,7 +21,9 @@ async function getFollowerCount(fid) {
 
 async function checkAudienceCriteria(authorFid, interactorFid, audience) {
   try {
-    if (audience === 2) { // Anyone
+    // Audience 2 = Anyone (no restrictions)
+    if (audience === 2) {
+      console.log(`Audience check: Anyone allowed - ${interactorFid} can get tip`);
       return true;
     }
     
@@ -31,17 +33,27 @@ async function checkAudienceCriteria(authorFid, interactorFid, audience) {
       },
     });
     
-    const data = await response.json();
-    
-    if (audience === 0) { // Following - check if interactor is in author's following
-      return data.following?.some(user => user.fid === interactorFid) || false;
-    } else if (audience === 1) { // Followers - check if interactor is in author's followers
-      return data.followers?.some(user => user.fid === interactorFid) || false;
+    if (!response.ok) {
+      console.error(`Failed to fetch follows for FID ${authorFid}: ${response.status}`);
+      return false;
     }
     
+    const data = await response.json();
+    
+    if (audience === 0) { // Following - ONLY users the caster follows can get tips
+      const isFollowing = data.following?.some(user => user.fid === interactorFid) || false;
+      console.log(`Audience check: Following - ${interactorFid} is ${isFollowing ? 'in' : 'NOT in'} caster's following list`);
+      return isFollowing;
+    } else if (audience === 1) { // Followers - ONLY caster's followers can get tips
+      const isFollower = data.followers?.some(user => user.fid === interactorFid) || false;
+      console.log(`Audience check: Followers - ${interactorFid} is ${isFollower ? 'a' : 'NOT a'} follower of caster`);
+      return isFollower;
+    }
+    
+    console.log(`Invalid audience value: ${audience}`);
     return false;
   } catch (error) {
-    console.error('Error checking audience criteria:', error);
+    console.error(`Error checking audience criteria for ${interactorFid}:`, error);
     return false;
   }
 }
@@ -78,9 +90,54 @@ async function getCastByHash(hash) {
   }
 }
 
+async function getNeynarScore(fid) {
+  try {
+    const response = await fetch(`https://api.neynar.com/v2/farcaster/user/bulk?fids=${fid}`, {
+      headers: {
+        'api_key': process.env.NEYNAR_API_KEY,
+      },
+    });
+    
+    const data = await response.json();
+    if (data.users && data.users[0]) {
+      // Neynar score is in power_badge field (0.0 to 1.0)
+      return data.users[0].power_badge || 0;
+    }
+    return 0;
+  } catch (error) {
+    console.error('Error fetching Neynar score:', error);
+    return 0;
+  }
+}
+
+async function getUserData(fid) {
+  try {
+    const response = await fetch(`https://api.neynar.com/v2/farcaster/user/bulk?fids=${fid}`, {
+      headers: {
+        'api_key': process.env.NEYNAR_API_KEY,
+      },
+    });
+    
+    const data = await response.json();
+    if (data.users && data.users[0]) {
+      const user = data.users[0];
+      return {
+        followerCount: user.follower_count || 0,
+        neynarScore: user.power_badge || 0
+      };
+    }
+    return { followerCount: 0, neynarScore: 0 };
+  } catch (error) {
+    console.error('Error fetching user data:', error);
+    return { followerCount: 0, neynarScore: 0 };
+  }
+}
+
 module.exports = {
   getFollowerCount,
   checkAudienceCriteria,
   getUserByFid,
-  getCastByHash
+  getCastByHash,
+  getNeynarScore,
+  getUserData
 };
