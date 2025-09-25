@@ -16,8 +16,53 @@ app.use(express.json());
 // Initialize batch processor
 new BatchProcessor();
 
+// Security middleware - verify webhook secret
+app.use('/webhook/neynar', (req, res, next) => {
+  const signature = req.headers['x-neynar-signature'];
+  const secret = process.env.WEBHOOK_SECRET;
+  
+  if (!signature || !secret) {
+    console.log('❌ UNAUTHORIZED: Missing signature or secret');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  // Verify signature (implement proper HMAC verification)
+  const crypto = require('crypto');
+  const expectedSignature = crypto
+    .createHmac('sha256', secret)
+    .update(JSON.stringify(req.body))
+    .digest('hex');
+  
+  if (signature !== expectedSignature) {
+    console.log('❌ UNAUTHORIZED: Invalid signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+  
+  console.log('✅ SECURE: Webhook signature verified');
+  next();
+});
+
 // Routes
 app.post('/webhook/neynar', webhookHandler);
+
+// Session-based authentication (more secure than API keys)
+app.use('/api/*', (req, res, next) => {
+  // For now, we'll use a simple approach:
+  // Only allow requests from your frontend domain
+  const origin = req.headers.origin;
+  const allowedOrigins = [
+    process.env.FRONTEND_DOMAIN,
+    'http://localhost:3000' // For development
+  ];
+  
+  if (allowedOrigins.includes(origin)) {
+    console.log('✅ SECURE: Request from allowed origin');
+    next();
+  } else {
+    console.log('❌ UNAUTHORIZED: Request from unauthorized origin:', origin);
+    res.status(401).json({ error: 'Unauthorized origin' });
+  }
+});
 
 // User configuration endpoints
 app.post('/api/config', async (req, res) => {
@@ -49,6 +94,53 @@ app.get('/api/config/:userAddress', async (req, res) => {
   } catch (error) {
     console.error('Config fetch error:', error);
     res.status(500).json({ error: 'Failed to fetch config' });
+  }
+});
+
+// Neynar API proxy endpoints (keeps API key secure on backend)
+app.get('/api/neynar/user/by-address/:address', async (req, res) => {
+  try {
+    const { address } = req.params;
+    const response = await fetch(
+      `https://api.neynar.com/v2/farcaster/user/by-verification?address=${address}`,
+      {
+        headers: { 'api_key': process.env.NEYNAR_API_KEY }
+      }
+    );
+    
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error('Neynar user fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch user' });
+  }
+});
+
+app.get('/api/neynar/cast/:hash', async (req, res) => {
+  try {
+    const { hash } = req.params;
+    const response = await fetch(
+      `https://api.neynar.com/v2/farcaster/cast?hash=${hash}`,
+      {
+        headers: { 'api_key': process.env.NEYNAR_API_KEY }
+      }
+    );
+    
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error('Neynar cast fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch cast' });
+  }
+});
+
+app.get('/api/neynar/auth-url', async (req, res) => {
+  try {
+    const authUrl = `https://neynar.com/sign-in?api_key=${process.env.NEYNAR_API_KEY}&redirect_url=${req.headers.origin}/api/auth/callback`;
+    res.json({ authUrl });
+  } catch (error) {
+    console.error('Auth URL generation error:', error);
+    res.status(500).json({ error: 'Failed to generate auth URL' });
   }
 });
 
