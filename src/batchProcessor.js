@@ -1,6 +1,6 @@
 const { ethers } = require('ethers');
 const database = require('./database');
-const { getFollowerCount, checkAudienceCriteria } = require('./neynar');
+const { getFollowerCount, checkAudienceCriteria, getUserData } = require('./neynar');
 
 class BatchProcessor {
   constructor() {
@@ -103,19 +103,32 @@ class BatchProcessor {
           continue;
         }
 
-        // Check follower count
-        const followerCount = await getFollowerCount(tip.interactorFid);
-        if (followerCount < authorConfig.minFollowerCount) {
-          console.log(`Interactor ${tip.interactorFid} has ${followerCount} followers, required: ${authorConfig.minFollowerCount}`);
+        // Get user data (follower count + Neynar score in one API call)
+        const userData = await getUserData(tip.interactorFid);
+        
+        // Check follower count - MUST meet minimum
+        if (userData.followerCount < authorConfig.minFollowerCount) {
+          console.log(`❌ FOLLOWER CHECK FAILED: Interactor ${tip.interactorFid} has ${userData.followerCount} followers, but caster requires ${authorConfig.minFollowerCount} followers minimum`);
           continue;
         }
+        console.log(`✅ FOLLOWER CHECK PASSED: Interactor ${tip.interactorFid} has ${userData.followerCount} followers (required: ${authorConfig.minFollowerCount})`);
 
-        // Check audience criteria
+        // Check Neynar score - MUST meet minimum
+        if (userData.neynarScore < authorConfig.minNeynarScore) {
+          console.log(`❌ NEYNAR SCORE CHECK FAILED: Interactor ${tip.interactorFid} has Neynar score ${userData.neynarScore}, but caster requires ${authorConfig.minNeynarScore} minimum`);
+          continue;
+        }
+        console.log(`✅ NEYNAR SCORE CHECK PASSED: Interactor ${tip.interactorFid} has Neynar score ${userData.neynarScore} (required: ${authorConfig.minNeynarScore})`);
+
+        // Check audience criteria - MUST be in allowed audience
         const meetsAudience = await checkAudienceCriteria(tip.authorFid, tip.interactorFid, authorConfig.audience);
         if (!meetsAudience) {
-          console.log(`Interactor ${tip.interactorFid} doesn't meet audience criteria`);
+          const audienceText = authorConfig.audience === 0 ? 'Following' : authorConfig.audience === 1 ? 'Followers' : 'Anyone';
+          console.log(`❌ AUDIENCE CHECK FAILED: Interactor ${tip.interactorFid} is not in caster's ${audienceText} list`);
           continue;
         }
+        const audienceText = authorConfig.audience === 0 ? 'Following' : authorConfig.audience === 1 ? 'Followers' : 'Anyone';
+        console.log(`✅ AUDIENCE CHECK PASSED: Interactor ${tip.interactorFid} is in caster's ${audienceText} list`);
 
         // Get tip amount
         const amount = this.getTipAmount(authorConfig, tip.actionType);
@@ -130,10 +143,17 @@ class BatchProcessor {
           continue;
         }
 
-        // Check backend has enough tokens
+        // Check backend has enough tokens AND user allowance
         const backendBalance = await this.getBackendTokenBalance(authorConfig.tokenAddress);
+        const userAllowance = await this.getUserTokenAllowance(tip.authorAddress, authorConfig.tokenAddress);
+        
         if (backendBalance < amount) {
           console.log(`Backend has insufficient ${authorConfig.tokenAddress} tokens`);
+          continue;
+        }
+        
+        if (userAllowance < amount) {
+          console.log(`User ${tip.authorAddress} has insufficient allowance: ${userAllowance} < ${amount}`);
           continue;
         }
 
@@ -272,6 +292,20 @@ class BatchProcessor {
       return parseFloat(ethers.formatUnits(balance, 6)); // Assuming 6 decimals for USDC
     } catch (error) {
       console.error('Error getting backend balance:', error);
+      return 0;
+    }
+  }
+
+  async getUserTokenAllowance(userAddress, tokenAddress) {
+    try {
+      const tokenContract = new ethers.Contract(tokenAddress, [
+        "function allowance(address owner, address spender) view returns (uint256)"
+      ], this.provider);
+      
+      const allowance = await tokenContract.allowance(userAddress, this.wallet.address);
+      return parseFloat(ethers.formatUnits(allowance, 6)); // Assuming 6 decimals for USDC
+    } catch (error) {
+      console.error('Error getting user allowance:', error);
       return 0;
     }
   }
