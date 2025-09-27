@@ -52,11 +52,12 @@ app.use('/api/*', (req, res, next) => {
   const origin = req.headers.origin;
   const allowedOrigins = [
     process.env.FRONTEND_DOMAIN,
-    'http://localhost:3000' // For development
+    'http://localhost:3000', // For development
+    'https://ecion.vercel.app' // Production domain only
   ];
   
   if (allowedOrigins.includes(origin)) {
-    console.log('✅ SECURE: Request from allowed origin');
+    console.log('✅ SECURE: Request from allowed origin:', origin);
     next();
   } else {
     console.log('❌ UNAUTHORIZED: Request from unauthorized origin:', origin);
@@ -89,11 +90,136 @@ app.post('/api/config', async (req, res) => {
 
 app.get('/api/config/:userAddress', async (req, res) => {
   try {
-    const config = await database.getUserConfig(req.params.userAddress);
+    let config = await database.getUserConfig(req.params.userAddress);
+    
+    // If no config exists, return default configuration
+    if (!config) {
+      config = {
+        tokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // USDC on Base
+        likeAmount: '0.01',
+        replyAmount: '0.025',
+        recastAmount: '0.025',
+        quoteAmount: '0.025',
+        followAmount: '0',
+        spendingLimit: '999999',
+        audience: 0, // Following only
+        minFollowerCount: 25,
+        minNeynarScore: 0.5,
+        likeEnabled: true,
+        replyEnabled: true,
+        recastEnabled: true,
+        quoteEnabled: true,
+        followEnabled: false,
+        isActive: false, // Not active until user saves
+        totalSpent: '0'
+      };
+    }
+    
     res.json({ config });
   } catch (error) {
     console.error('Config fetch error:', error);
     res.status(500).json({ error: 'Failed to fetch config' });
+  }
+});
+
+// Token allowance endpoint
+app.get('/api/allowance/:userAddress/:tokenAddress', async (req, res) => {
+  try {
+    const { userAddress, tokenAddress } = req.params;
+    const { ethers } = require('ethers');
+    
+    const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL);
+    const backendWallet = new ethers.Wallet(process.env.BACKEND_WALLET_PRIVATE_KEY, provider);
+    
+    const tokenContract = new ethers.Contract(tokenAddress, [
+      "function allowance(address owner, address spender) view returns (uint256)"
+    ], provider);
+    
+    const allowance = await tokenContract.allowance(userAddress, backendWallet.address);
+    const tokenDecimals = tokenAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 6 : 18;
+    const formattedAllowance = ethers.formatUnits(allowance, tokenDecimals);
+    
+    res.json({ allowance: formattedAllowance });
+  } catch (error) {
+    console.error('Allowance fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch allowance' });
+  }
+});
+
+// Token info endpoint
+app.get('/api/token-info/:tokenAddress', async (req, res) => {
+  try {
+    const { tokenAddress } = req.params;
+    const { ethers } = require('ethers');
+    
+    const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL);
+    
+    const tokenContract = new ethers.Contract(tokenAddress, [
+      "function name() view returns (string)",
+      "function symbol() view returns (string)",
+      "function decimals() view returns (uint8)"
+    ], provider);
+    
+    const [name, symbol, decimals] = await Promise.all([
+      tokenContract.name(),
+      tokenContract.symbol(),
+      tokenContract.decimals()
+    ]);
+    
+    res.json({ name, symbol, decimals: Number(decimals) });
+  } catch (error) {
+    console.error('Token info fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch token info' });
+  }
+});
+
+// Approve token endpoint
+app.post('/api/approve', async (req, res) => {
+  try {
+    const { userAddress, tokenAddress, amount } = req.body;
+    
+    if (!userAddress || !tokenAddress || !amount) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    // For now, just return success - the actual approval happens on frontend
+    // In a real implementation, you might want to track approvals in the database
+    console.log(`User ${userAddress} approved ${amount} of token ${tokenAddress}`);
+    
+    res.json({ 
+      success: true, 
+      message: `Approved ${amount} tokens`,
+      userAddress,
+      tokenAddress,
+      amount
+    });
+  } catch (error) {
+    console.error('Approve error:', error);
+    res.status(500).json({ error: 'Failed to process approval' });
+  }
+});
+
+// Revoke token endpoint
+app.post('/api/revoke', async (req, res) => {
+  try {
+    const { userAddress, tokenAddress } = req.body;
+    
+    if (!userAddress || !tokenAddress) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    // For now, just return success - the actual revocation happens on frontend
+    console.log(`User ${userAddress} revoked token ${tokenAddress}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Token allowance revoked',
+      userAddress,
+      tokenAddress
+    });
+  } catch (error) {
+    console.error('Revoke error:', error);
+    res.status(500).json({ error: 'Failed to process revocation' });
   }
 });
 
@@ -144,6 +270,100 @@ app.get('/api/neynar/auth-url', async (req, res) => {
   }
 });
 
+// Homepage endpoint - Recent casts from approved users
+app.get('/api/homepage', async (req, res) => {
+  try {
+    const { timeFilter = '24h' } = req.query;
+    
+    // Get users with active configurations and token approvals
+    const activeUsers = await database.getActiveUsersWithApprovals();
+    
+    // Fetch recent casts for each approved user
+    const userCasts = [];
+    
+    for (const userAddress of activeUsers.slice(0, 10)) { // Top 10 users
+      try {
+        // Get user's Farcaster profile first
+        const userResponse = await fetch(
+          `https://api.neynar.com/v2/farcaster/user/by-verification?address=${userAddress}`,
+          {
+            headers: { 'api_key': process.env.NEYNAR_API_KEY }
+          }
+        );
+        
+        if (userResponse.ok) {
+          const userData = await userResponse.json();
+          const farcasterUser = userData.users?.[0];
+          
+          if (farcasterUser) {
+            // Fetch user's recent casts (last 2)
+            const castsResponse = await fetch(
+              `https://api.neynar.com/v2/farcaster/feed/user/casts?fid=${farcasterUser.fid}&limit=2`,
+              {
+                headers: { 'api_key': process.env.NEYNAR_API_KEY }
+              }
+            );
+            
+            if (castsResponse.ok) {
+              const castsData = await castsResponse.json();
+              const casts = castsData.casts || [];
+              
+              // Add user info to each cast
+              const enrichedCasts = casts.map(cast => ({
+                ...cast,
+                tipper: {
+                  userAddress,
+                  username: farcasterUser.username,
+                  displayName: farcasterUser.display_name,
+                  pfpUrl: farcasterUser.pfp_url,
+                  fid: farcasterUser.fid
+                }
+              }));
+              
+              userCasts.push(...enrichedCasts);
+            }
+          }
+        }
+      } catch (error) {
+        console.log(`Could not fetch casts for user ${userAddress}:`, error.message);
+      }
+    }
+    
+    // Sort by timestamp (most recent first)
+    userCasts.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    res.json({ 
+      casts: userCasts,
+      users: activeUsers.slice(0, 10),
+      amounts: activeUsers.map(() => '0')
+    });
+  } catch (error) {
+    console.error('Homepage fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch homepage data' });
+  }
+});
+
+// Leaderboard endpoints  
+app.get('/api/leaderboard', async (req, res) => {
+  try {
+    const { timeFilter = '30d' } = req.query;
+    
+    // Get top tippers and earners with amounts
+    const topTippers = await database.getTopTippers(timeFilter);
+    const topEarners = await database.getTopEarners(timeFilter);
+    
+    res.json({
+      tippers: topTippers,
+      earners: topEarners,
+      users: topTippers.map(t => t.userAddress),
+      amounts: topTippers.map(t => t.totalAmount)
+    });
+  } catch (error) {
+    console.error('Leaderboard fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch leaderboard data' });
+  }
+});
+
 // Tip history endpoints
 app.get('/api/history/:userAddress', async (req, res) => {
   try {
@@ -152,6 +372,21 @@ app.get('/api/history/:userAddress', async (req, res) => {
   } catch (error) {
     console.error('History fetch error:', error);
     res.status(500).json({ error: 'Failed to fetch history' });
+  }
+});
+
+// Backend wallet address endpoint
+app.get('/api/backend-wallet', (req, res) => {
+  try {
+    const { ethers } = require('ethers');
+    const wallet = new ethers.Wallet(process.env.BACKEND_WALLET_PRIVATE_KEY);
+    res.json({ 
+      address: wallet.address,
+      network: 'Base'
+    });
+  } catch (error) {
+    console.error('Backend wallet fetch error:', error);
+    res.status(500).json({ error: 'Failed to get backend wallet address' });
   }
 });
 
